@@ -1,4 +1,4 @@
-name: Build Android APK via EAS (Expo)
+name: Build Debug APK (test)
 
 on:
   workflow_dispatch:
@@ -7,86 +7,59 @@ on:
       - main
 
 jobs:
-  eas-build:
+  build-debug:
     runs-on: ubuntu-latest
-    env:
-      EXPO_TOKEN: ${{ secrets.EAS_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
-          node-version: '18'
+          distribution: temurin
+          java-version: '17'
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install EAS CLI
-        run: npm install -g eas-cli
-
-      - name: Login to EAS
-        env:
-          EAS_TOKEN: ${{ secrets.EAS_TOKEN }}
+      - name: Find gradlew
+        id: findgradle
         run: |
-          eas whoami || (echo "EAS login failed" && exit 1)
-
-      - name: Start EAS build (Android, profile: preview)
-        id: start
-        env:
-          EAS_TOKEN: ${{ secrets.EAS_TOKEN }}
-        run: |
-          echo "Starting EAS build..."
-          # Use --platform android and a profile that produces an APK (see docs)
-          eas build --platform android --profile preview --non-interactive --json > eas-build-start.json
-          cat eas-build-start.json
-          buildId=$(jq -r '.[0].id // .id' eas-build-start.json)
-          echo "buildId=$buildId" >> $GITHUB_OUTPUT
-
-      - name: Wait for EAS build to finish and get artifact URL
-        id: wait
-        env:
-          EAS_TOKEN: ${{ secrets.EAS_TOKEN }}
-        run: |
-          buildId=${{ steps.start.outputs.buildId }}
-          if [ -z "$buildId" ] || [ "$buildId" = "null" ]; then
-            echo "No build id found"
-            cat eas-build-start.json
-            exit 1
+          # Prefer root gradlew
+          if [ -f "./gradlew" ]; then
+            echo "path=." >> $GITHUB_OUTPUT
+          else
+            # Search for gradlew in subdirectories
+            f=$(find . -maxdepth 6 -type f -name gradlew -print -quit || true)
+            if [ -n "$f" ]; then
+              d=$(dirname "$f")
+              echo "path=${d}" >> $GITHUB_OUTPUT
+            else
+              echo "path=" >> $GITHUB_OUTPUT
+            fi
           fi
-          echo "Inspecting build $buildId"
-          status=""
-          attempts=0
-          while [ "$status" != "finished" ] && [ "$status" != "errored" ] && [ $attempts -lt 60 ]; do
-            sleep 10
-            attempts=$((attempts+1))
-            resp=$(eas build:inspect --platform android "$buildId" --json)
-            status=$(echo "$resp" | jq -r '.status')
-            echo "Attempt $attempts - status: $status"
-            echo "$resp" > "eas-inspect-$attempts.json"
-          done
-          if [ "$status" != "finished" ]; then
-            echo "Build did not finish successfully. Last status: $status"
-            exit 1
-          fi
-          artifactUrl=$(echo "$resp" | jq -r '.artifacts[0].url // .artifacts[0].url')
-          echo "artifactUrl=$artifactUrl" >> $GITHUB_OUTPUT
-          echo "artifactUrl: $artifactUrl"
 
-      - name: Download APK artifact
-        if: success() && steps.wait.outputs.artifactUrl != ''
+      - name: Ensure gradlew is executable (if found)
         run: |
-          url="${{ steps.wait.outputs.artifactUrl }}"
-          echo "Downloading artifact from $url"
-          curl -L "$url" -o app.apk
-          ls -lh app.apk
+          if [ -n "${{ steps.findgradle.outputs.path }}" ] && [ -f "${{ steps.findgradle.outputs.path }}/gradlew" ]; then
+            chmod +x "${{ steps.findgradle.outputs.path }}/gradlew"
+            echo "Made ${ { steps.findgradle.outputs.path } }/gradlew executable" || true
+          else
+            echo "No gradlew found"
+          fi
 
-      - name: Upload APK as workflow artifact
-        if: success() && steps.wait.outputs.artifactUrl != ''
+      - name: Build Debug APK (if gradle wrapper exists)
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.findgradle.outputs.path }}" ] && [ -f "${{ steps.findgradle.outputs.path }}/gradlew" ]; then
+            cd "${{ steps.findgradle.outputs.path }}"
+            ./gradlew --no-daemon assembleDebug
+          else
+            echo "Skipping build: no gradlew found in repository"
+          fi
+
+      - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
-          path: app.apk
+          path: |
+            **/build/outputs/**/*.apk
