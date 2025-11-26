@@ -1,4 +1,4 @@
-name: Build Debug APK (test)
+name: Build Debug APK (auto-detect)
 
 on:
   workflow_dispatch:
@@ -15,24 +15,68 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 17
+      - name: Set up JDK 17 (no cache)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
+          cache: none
 
-      - name: Ensure gradlew is executable
-        run: chmod +x ./gradlew
+      - name: Detect Android project directory
+        id: detect
+        run: |
+          echo "Searching for Android/Gradle files..."
+          ANDROID_DIR=""
+          # Prefer settings.gradle(.kts)
+          f=$(find . -maxdepth 5 -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -print -quit)
+          if [ -n "$f" ]; then
+            ANDROID_DIR=$(dirname "$f")
+          else
+            # Fallback to build.gradle(.kts) or gradle-wrapper.properties
+            f=$(find . -maxdepth 6 -type f \( -name "gradle-wrapper.properties" -o -name "build.gradle" -o -name "build.gradle.kts" \) -print -quit)
+            if [ -n "$f" ]; then
+              ANDROID_DIR=$(dirname "$f")
+            fi
+          fi
+          if [ -z "$ANDROID_DIR" ]; then
+            echo "No Android/Gradle files found. Listing repo root for debugging:"
+            ls -la
+            exit 1
+          fi
+          echo "Found Android directory: $ANDROID_DIR"
+          echo "ANDROID_DIR=$ANDROID_DIR" >> $GITHUB_OUTPUT
+
+      - name: Show detected files (debug)
+        if: always()
+        run: |
+          echo "ANDROID_DIR=${{ steps.detect.outputs.ANDROID_DIR }}"
+          ls -la "${{ steps.detect.outputs.ANDROID_DIR }}" || true
+
+      - name: Ensure gradlew is executable (if present)
+        run: |
+          if [ -f "${{ steps.detect.outputs.ANDROID_DIR }}/gradlew" ]; then
+            chmod +x "${{ steps.detect.outputs.ANDROID_DIR }}/gradlew"
+            echo "Made ${ { steps.detect.outputs.ANDROID_DIR }}/gradlew executable"
+          elif [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            echo "Made ./gradlew executable"
+          fi
 
       - name: Build Debug APK
-        run: ./gradlew --no-daemon assembleDebug
-        # Se seu módulo não for `app`, substitua por: ./gradlew :yourModule:assembleDebug
+        run: |
+          set -euo pipefail
+          cd "${{ steps.detect.outputs.ANDROID_DIR }}"
+          echo "Building from $(pwd)"
+          if [ -f "./gradlew" ]; then
+            ./gradlew --no-daemon assembleDebug
+          else
+            # If no gradlew, try calling gradle (requires gradle on runner)
+            gradle assembleDebug
+          fi
 
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
           path: |
-            app/build/outputs/apk/debug/*.apk
-            */build/outputs/apk/debug/*.apk
+            **/build/outputs/apk/debug/*.apk
